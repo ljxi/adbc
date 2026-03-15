@@ -1,6 +1,9 @@
 import asyncio
 import socket
 import subprocess
+import threading
+
+from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
 
 async def check_adb_port(ip, port=5555, timeout=0.5):
     """检查指定IP是否开放ADB端口"""
@@ -70,6 +73,31 @@ async def scan_network(network=None, port=5555, concurrency=100, timeout=0.5):
 
     return devices
 
+async def discover_mdns_devices(timeout=3):
+    """通过 mDNS 发现 ADB 无线调试设备"""
+    devices = []
+    lock = threading.Lock()
+
+    def on_service_state_change(zeroconf, service_type, name, state_change):
+        if state_change is ServiceStateChange.Added:
+            info = zeroconf.get_service_info(service_type, name)
+            if info and info.addresses:
+                ip = socket.inet_ntoa(info.addresses[0])
+                port = info.port
+                with lock:
+                    devices.append((ip, port))
+
+    def run_browser():
+        zc = Zeroconf()
+        browser = ServiceBrowser(zc, "_adb-tls-connect._tcp.local.", handlers=[on_service_state_change])
+        threading.Event().wait(timeout)
+        browser.cancel()
+        zc.close()
+
+    await asyncio.to_thread(run_browser)
+    return devices
+
+
 def connect_adb(ip, port=5555):
     """连接ADB设备"""
     try:
@@ -85,26 +113,45 @@ def connect_adb(ip, port=5555):
 
 async def adbc():
     subprocess.Popen(["adb", "devices"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     try:
         network_prefix = detect_network_segment()
     except RuntimeError as exc:
         print(exc)
         return
 
-    print(f"Scanning for ADB devices on {network_prefix}.0/24...")
-    devices = await scan_network(network=network_prefix)
+    print(f"Scanning for ADB devices on {network_prefix}.0/24 + mDNS...")
+    tcp_devices, mdns_devices = await asyncio.gather(
+        scan_network(network=network_prefix),
+        discover_mdns_devices(),
+    )
 
-    if not devices:
+    # 合并去重：以 ip:port 为 key
+    seen = set()
+    all_devices = []
+
+    for ip in tcp_devices:
+        key = f"{ip}:5555"
+        if key not in seen:
+            seen.add(key)
+            all_devices.append((ip, 5555))
+
+    for ip, port in mdns_devices:
+        key = f"{ip}:{port}"
+        if key not in seen:
+            seen.add(key)
+            all_devices.append((ip, port))
+
+    if not all_devices:
         print("No ADB devices found.")
         return
 
-    for device in devices:
-        print(f"Found device at {device}, connecting...")
-        if connect_adb(device):
-            print(f"✓ Connected to {device}")
+    for ip, port in all_devices:
+        print(f"Found device at {ip}:{port}, connecting...")
+        if connect_adb(ip, port):
+            print(f"✓ Connected to {ip}:{port}")
         else:
-            print(f"✗ Failed to connect to {device}")
+            print(f"✗ Failed to connect to {ip}:{port}")
 
 def main():
     asyncio.run(adbc())
