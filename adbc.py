@@ -1,6 +1,7 @@
 import asyncio
 import socket
 import subprocess
+import sys
 import threading
 
 from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
@@ -49,8 +50,8 @@ def detect_network_segment():
     raise RuntimeError("无法自动识别网段，请手动指定")
 
 
-async def scan_network(network=None, port=5555, concurrency=100, timeout=0.5):
-    """扫描整个网段"""
+async def scan_network(network=None, port=5555, concurrency=100, timeout=0.5, first_only=False):
+    """扫描整个网段，first_only=True 时找到第一个就返回"""
     network_prefix = network or detect_network_segment()
     semaphore = asyncio.Semaphore(concurrency)
     tasks = []
@@ -70,6 +71,10 @@ async def scan_network(network=None, port=5555, concurrency=100, timeout=0.5):
         ip = await task
         if ip:
             devices.append(ip)
+            if first_only:
+                for t in tasks:
+                    t.cancel()
+                break
 
     return devices
 
@@ -111,8 +116,12 @@ def connect_adb(ip, port=5555):
     except (subprocess.SubprocessError, OSError):
         return False
 
-async def adbc():
-    subprocess.Popen(["adb", "start-server"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+async def adbc(connect_all=False):
+    if connect_all:
+        subprocess.Popen(["adb", "start-server"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        # 默认模式：先断开所有已连接设备
+        subprocess.Popen(["adb", "disconnect"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
         network_prefix = detect_network_segment()
@@ -120,9 +129,10 @@ async def adbc():
         print(exc)
         return
 
+    first_only = not connect_all
     print(f"Scanning for ADB devices on {network_prefix}.0/24 + mDNS...")
     tcp_devices, mdns_devices = await asyncio.gather(
-        scan_network(network=network_prefix),
+        scan_network(network=network_prefix, first_only=first_only),
         discover_mdns_devices(),
     )
 
@@ -152,9 +162,12 @@ async def adbc():
             print(f"✓ Connected to {ip}:{port}")
         else:
             print(f"✗ Failed to connect to {ip}:{port}")
+        if first_only:
+            break
 
 def main():
-    asyncio.run(adbc())
+    connect_all = len(sys.argv) > 1 and sys.argv[1] == "all"
+    asyncio.run(adbc(connect_all=connect_all))
 
 if __name__ == "__main__":
     main()
