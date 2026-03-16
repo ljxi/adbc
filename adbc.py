@@ -78,10 +78,11 @@ async def scan_network(network=None, port=5555, concurrency=100, timeout=0.5, fi
 
     return devices
 
-async def discover_mdns_devices(timeout=3):
-    """通过 mDNS 发现 ADB 无线调试设备"""
+async def discover_mdns_devices(timeout=3, first_only=False):
+    """通过 mDNS 发现 ADB 无线调试设备，first_only=True 时找到第一个就返回"""
     devices = []
     lock = threading.Lock()
+    found_event = threading.Event()
 
     def on_service_state_change(zeroconf, service_type, name, state_change):
         if state_change is ServiceStateChange.Added:
@@ -91,11 +92,16 @@ async def discover_mdns_devices(timeout=3):
                 port = info.port
                 with lock:
                     devices.append((ip, port))
+                if first_only:
+                    found_event.set()
 
     def run_browser():
         zc = Zeroconf()
         browser = ServiceBrowser(zc, "_adb-tls-connect._tcp.local.", handlers=[on_service_state_change])
-        threading.Event().wait(timeout)
+        if first_only:
+            found_event.wait(timeout)
+        else:
+            threading.Event().wait(timeout)
         browser.cancel()
         zc.close()
 
@@ -133,7 +139,7 @@ async def adbc(connect_all=False):
     print(f"Scanning for ADB devices on {network_prefix}.0/24 + mDNS...")
     tcp_devices, mdns_devices = await asyncio.gather(
         scan_network(network=network_prefix, first_only=first_only),
-        discover_mdns_devices(),
+        discover_mdns_devices(first_only=first_only),
     )
 
     # 合并去重：以 ip:port 为 key
