@@ -112,7 +112,7 @@ def connect_adb(ip, port=5555):
         return False
 
 async def adbc():
-    subprocess.Popen(["adb", "devices"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(["adb", "disconnect"],stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
         network_prefix = detect_network_segment()
